@@ -1268,11 +1268,13 @@ function $handleInput(event: InputEvent): boolean {
     // must not re-insert via CONTROLLED_TEXT_INSERTION_COMMAND — let
     // $updateSelectedTextFromDOM sync from the DOM instead. Not gated
     // on IS_IOS because the formatText → $setCompositionKey(null) path
-    // is platform-independent.
+    // is platform-independent. An element anchor can result from normalizing
+    // an empty composition text node; allow model insertion in that case.
     const isOrphanedCompositionEnd =
       event.inputType === 'insertCompositionText' &&
       inputState.compositionPhase !== 'ending-firefox' &&
-      !editor.isComposing();
+      !editor.isComposing() &&
+      selection.anchor.type === 'text';
     if (isOrphanedCompositionEnd) {
       inputState.hadOrphanedCompositionEvents = true;
     }
