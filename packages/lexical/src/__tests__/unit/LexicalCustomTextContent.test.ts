@@ -11,6 +11,7 @@ import {
   $create,
   $createParagraphNode,
   $createTextNode,
+  $getEditor,
   $getRoot,
   $removeSlot,
   $setSlot,
@@ -28,6 +29,17 @@ class CustomUnsizedParagraphNode extends ParagraphNode {
 
   getTextContent(): string {
     return `~"${super.getTextContent()}"`;
+  }
+}
+
+/** Text read from the editor, as a node that looks it up in the editor's context. */
+class EditorBoundParagraphNode extends ParagraphNode {
+  $config() {
+    return this.config('editor-bound-paragraph', {extends: ParagraphNode});
+  }
+
+  getTextContent(): string {
+    return `${$getEditor().getKey()}:${super.getTextContent()}`;
   }
 }
 
@@ -270,3 +282,29 @@ describe.each([CustomSizedParagraphNode, CustomUnsizedParagraphNode])(
     });
   },
 );
+
+test('text content listeners read text with the editor active', () => {
+  // Headless: without a root element nothing has read the text with the editor
+  // active before the listeners do.
+  using editor = buildEditorFromExtensions(
+    defineExtension({
+      name: 'EditorBoundTextContent',
+      nodes: [EditorBoundParagraphNode],
+    }),
+  );
+  const changes: string[] = [];
+  onTestFinished(
+    editor.registerTextContentListener(value => changes.push(value)),
+  );
+  editor.update(
+    () => {
+      $getRoot()
+        .clear()
+        .append(
+          $create(EditorBoundParagraphNode).append($createTextNode('Hi')),
+        );
+    },
+    {discrete: true},
+  );
+  expect(changes).toEqual([`${editor.getKey()}:Hi`]);
+});

@@ -19,6 +19,7 @@ import {$isHeadingNode, $isQuoteNode} from '@lexical/rich-text';
 import {
   $createParagraphNode,
   $createTextNode,
+  $getEditor,
   $getRoot,
   $getSelection,
   $getState,
@@ -30,6 +31,7 @@ import {
   KEY_ENTER_COMMAND,
   type LexicalEditor,
   type LexicalNode,
+  TextNode,
 } from 'lexical';
 import {$assertNodeType} from 'lexical/src/__tests__/utils';
 import {describe, expect, it} from 'vitest';
@@ -432,5 +434,48 @@ describe('@lexical/mdast streaming shortcuts', () => {
         expect($getRoot().getTextContent()).toContain('**bold** title');
       });
     });
+  });
+});
+
+/**
+ * Text that depends on the editor it is read in, as a node that looks up its
+ * text in the editor's context does.
+ */
+class EditorBoundTextNode extends TextNode {
+  $config() {
+    return this.config('editor-bound-text', {extends: TextNode});
+  }
+
+  getTextContent(): string {
+    // Throws unless an editor is active.
+    $getEditor();
+    return super.getTextContent();
+  }
+}
+
+describe('@lexical/mdast shortcuts and the active editor', () => {
+  it('read the typed text with the editor active', () => {
+    using editor = buildEditorFromExtensions(
+      defineExtension({
+        dependencies: [
+          MdastCommonMarkExtension,
+          MdastGfmExtension,
+          MdastShortcutsExtension,
+        ],
+        name: '[root]',
+        nodes: [EditorBoundTextNode],
+      }),
+    );
+    editor.update(
+      () => {
+        const text = new EditorBoundTextNode('a');
+        $getRoot().clear().append($createParagraphNode().append(text));
+        text.selectEnd();
+      },
+      {discrete: true},
+    );
+
+    expect(() => type(editor, ['b'])).not.toThrow();
+    expect(editor.read(() => $getRoot().getTextContent())).toBe('ab');
   });
 });
