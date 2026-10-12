@@ -730,8 +730,15 @@ export function cloneDecorators(
   return pendingDecorators;
 }
 
-export function getEditorStateTextContent(editorState: EditorState): string {
-  return editorState.read(() => $getRoot().getTextContent());
+/**
+ * The editor state's text. Pass the editor it belongs to when there is one:
+ * a node may need it to read its text.
+ */
+export function getEditorStateTextContent(
+  editorState: EditorState,
+  editor: LexicalEditor | null = null,
+): string {
+  return editorState.read(() => $getRoot().getTextContent(), {editor});
 }
 
 export function markNodesWithTypesAsDirty(
