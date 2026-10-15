@@ -845,11 +845,13 @@ export function $syncLocalCursorPosition(
 function $setPoint(point: Point, key: NodeKey, offset: number): void {
   if (point.key !== key || point.offset !== offset) {
     let anchorNode = $getNodeByKey(key);
-    if (
-      anchorNode !== null &&
-      !$isElementNode(anchorNode) &&
-      !$isTextNode(anchorNode)
-    ) {
+    // A collab node can outlive its Lexical node within a sync, such as the
+    // text a concurrent edit emptied. The point is left for the caller's
+    // selection recovery.
+    if (anchorNode === null) {
+      return;
+    }
+    if (!$isElementNode(anchorNode) && !$isTextNode(anchorNode)) {
       const parent = anchorNode.getParentOrThrow();
       key = parent.getKey();
       offset = anchorNode.getIndexWithinParent();
