@@ -159,6 +159,14 @@ const PASS_THROUGH_COMMAND = /* @__PURE__ */ Object.freeze({});
 const ANDROID_COMPOSITION_LATENCY = 30;
 let rootElementEvents: RootElementEvents | undefined;
 
+function onBeforeInputEvent(event: Event, editor: LexicalEditor): void {
+  onBeforeInput(event as InputEvent, editor);
+}
+
+function onKeyUpEvent(event: Event, editor: LexicalEditor): void {
+  onKeyUp(event as KeyboardEvent, editor);
+}
+
 function getRootElementEvents(): RootElementEvents {
   if (rootElementEvents !== undefined) {
     return rootElementEvents;
@@ -180,17 +188,14 @@ function getRootElementEvents(): RootElementEvents {
     ['blur', PASS_THROUGH_COMMAND],
     ['drop', PASS_THROUGH_COMMAND],
   ];
+  // Module-level functions only: the production build inlines this function
+  // into addRootElementEvents, so a closure created here would share that
+  // call's scope and keep its editor alive for as long as this cache lives.
   if (CAN_USE_BEFORE_INPUT) {
-    events.push([
-      'beforeinput',
-      (event, editor) => onBeforeInput(event as InputEvent, editor),
-    ]);
+    events.push(['beforeinput', onBeforeInputEvent]);
   }
   if (IS_IOS) {
-    events.push(
-      ['keyup', (event, editor) => onKeyUp(event as KeyboardEvent, editor)],
-      ['mousedown', onMouseDownIOS],
-    );
+    events.push(['keyup', onKeyUpEvent], ['mousedown', onMouseDownIOS]);
   }
   rootElementEvents = events;
   return events;
