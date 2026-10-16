@@ -43,9 +43,15 @@ describe('CheckListExtension mobile tap toggle', () => {
         return originalGetComputedStyle.call(window, element, pseudoElement);
       },
     );
+    // Nor elementFromPoint, which a touch uses to find the item its padding
+    // reaches from beside it. Nothing lies beside the item unless a test says
+    // so.
+    document.elementFromPoint = () => null;
   });
   afterAll(() => {
     vi.restoreAllMocks();
+    // @ts-expect-error jsdom has no elementFromPoint of its own to restore
+    delete document.elementFromPoint;
   });
 
   const checkListExtension = defineExtension({
@@ -98,151 +104,109 @@ describe('CheckListExtension mobile tap toggle', () => {
     });
   }
 
-  it('touch pointerup over the marker area toggles the item', () => {
-    using editor = buildEditor();
-    expect(readChecked(editor, 0)).toBe(false);
-
-    const li = getCheckListItem(0);
-    // clientX is well inside the marker hit area for any plausible
-    // ::before width / touch padding combination.
-    li.dispatchEvent(
-      new PointerEvent('pointerup', {
-        bubbles: true,
-        cancelable: true,
-        clientX: 10,
-        clientY: 5,
-        pointerType: 'touch',
-      }),
-    );
-
-    expect(readChecked(editor, 0)).toBe(true);
-  });
-
-  it('mouse pointerup is ignored (click stays the desktop path)', () => {
-    using editor = buildEditor();
-    expect(readChecked(editor, 0)).toBe(false);
-
-    const li = getCheckListItem(0);
-    li.dispatchEvent(
-      new PointerEvent('pointerup', {
-        bubbles: true,
-        cancelable: true,
-        clientX: 10,
-        clientY: 5,
-        pointerType: 'mouse',
-      }),
-    );
-
-    expect(readChecked(editor, 0)).toBe(false);
-  });
-
-  it('pointerup followed by a synthesized click does not double-toggle', () => {
-    using editor = buildEditor();
-    expect(readChecked(editor, 0)).toBe(false);
-
-    const li = getCheckListItem(0);
-    const baseTimeStamp = 1000;
-    const pointerUp = new PointerEvent('pointerup', {
-      bubbles: true,
-      cancelable: true,
-      clientX: 10,
-      clientY: 5,
-      pointerType: 'touch',
+  // jsdom cannot construct Touch objects, so the touch lists are stubbed.
+  function dispatchTouch(
+    target: EventTarget,
+    type: 'touchstart' | 'touchmove' | 'touchend',
+    clientX: number,
+    clientY = 5,
+  ): Event {
+    const touch = {clientX, clientY};
+    const event = new Event(type, {bubbles: true, cancelable: true});
+    Object.defineProperties(event, {
+      changedTouches: {value: [touch]},
+      touches: {value: type === 'touchend' ? [] : [touch]},
     });
-    Object.defineProperty(pointerUp, 'timeStamp', {value: baseTimeStamp});
-    li.dispatchEvent(pointerUp);
-    expect(readChecked(editor, 0)).toBe(true);
+    target.dispatchEvent(event);
+    return event;
+  }
 
-    // Browsers where touchstart preventDefault did not suppress click
-    // also fire it shortly after. The dedup window must absorb it.
-    const click = new MouseEvent('click', {
-      bubbles: true,
-      cancelable: true,
-      clientX: 10,
-      clientY: 5,
-    });
-    Object.defineProperty(click, 'timeStamp', {value: baseTimeStamp + 50});
-    li.dispatchEvent(click);
-
-    expect(readChecked(editor, 0)).toBe(true);
-  });
-
-  it('rapid taps on two different items toggle both within the dedup window', () => {
+  it('a tap on the marker toggles the item once, canceling the pointerdown and touchend but not the touchstart', () => {
     using editor = buildEditor();
-    expect(readChecked(editor, 0)).toBe(false);
-    expect(readChecked(editor, 1)).toBe(false);
-
-    const baseTimeStamp = 1000;
-    const tap = (target: HTMLLIElement, offsetMs: number) => {
-      const event = new PointerEvent('pointerup', {
+    const li = getCheckListItem(0);
+    const dispatchPointer = (type: string) => {
+      const event = new PointerEvent(type, {
         bubbles: true,
         cancelable: true,
         clientX: 10,
         clientY: 5,
         pointerType: 'touch',
       });
-      Object.defineProperty(event, 'timeStamp', {
-        value: baseTimeStamp + offsetMs,
-      });
-      target.dispatchEvent(event);
+      li.dispatchEvent(event);
+      return event;
     };
 
-    tap(getCheckListItem(0), 0);
-    // 100ms later: well inside DEDUP_WINDOW_MS, tap a different box.
-    tap(getCheckListItem(1), 100);
+    const pointerDown = dispatchPointer('pointerdown');
+    const touchStart = dispatchTouch(li, 'touchstart', 10);
+    dispatchPointer('pointerup');
+    const touchEnd = dispatchTouch(li, 'touchend', 10);
 
+    // The canceled pointerdown and touchend keep the caret, the keyboard and
+    // the click away; a canceled touchstart would keep a swipe from scrolling.
+    expect(pointerDown.defaultPrevented).toBe(true);
+    expect(touchStart.defaultPrevented).toBe(false);
+    expect(touchEnd.defaultPrevented).toBe(true);
     expect(readChecked(editor, 0)).toBe(true);
-    expect(readChecked(editor, 1)).toBe(true);
   });
 
-  it('rapid mouse clicks on the same item all toggle (desktop not throttled)', () => {
+  it('a tap whose finger drifts within the slop still toggles', () => {
     using editor = buildEditor();
-    expect(readChecked(editor, 0)).toBe(false);
+    const li = getCheckListItem(0);
 
-    const baseTimeStamp = 1000;
-    const click = (offsetMs: number) => {
-      const event = new MouseEvent('click', {
-        bubbles: true,
-        cancelable: true,
-        clientX: 10,
-        clientY: 5,
-      });
-      Object.defineProperty(event, 'timeStamp', {
-        value: baseTimeStamp + offsetMs,
-      });
-      getCheckListItem(0).dispatchEvent(event);
-    };
+    dispatchTouch(li, 'touchstart', 10, 5);
+    dispatchTouch(li, 'touchmove', 14, 15);
+    dispatchTouch(li, 'touchend', 14, 15);
 
-    // Two rapid mouse clicks within the dedup window must both toggle.
-    click(0);
-    click(100);
+    expect(readChecked(editor, 0)).toBe(true);
+  });
 
+  it('a swipe from the marker toggles nothing and leaves the touchend alone', () => {
+    using editor = buildEditor();
+    const li = getCheckListItem(0);
+
+    dispatchTouch(li, 'touchstart', 10, 5);
+    dispatchTouch(li, 'touchmove', 10, -40);
+    const touchEnd = dispatchTouch(li, 'touchend', 10, -40);
+
+    expect(touchEnd.defaultPrevented).toBe(false);
     expect(readChecked(editor, 0)).toBe(false);
   });
 
-  it('rapid touch taps on the same item are throttled (mobile preserved)', () => {
+  // jsdom has no layout: the root spans 0 to 300 and the item sits at 0, so
+  // what lies at any x from 0 on is the item.
+  function tapWithLayout(target: EventTarget, clientX: number) {
+    const li = getCheckListItem(0);
+    const rootRect = vi
+      .spyOn(rootElement, 'getBoundingClientRect')
+      .mockReturnValue({bottom: 100, left: 0, right: 300, top: 0} as DOMRect);
+    const elementFromPoint = vi
+      .spyOn(document, 'elementFromPoint')
+      .mockImplementation(x => (x >= 0 ? li : null));
+    try {
+      dispatchTouch(target, 'touchstart', clientX);
+      dispatchTouch(target, 'touchend', clientX);
+    } finally {
+      elementFromPoint.mockRestore();
+      rootRect.mockRestore();
+    }
+  }
+
+  it('a tap beside the item, within the touch padding, toggles it', () => {
     using editor = buildEditor();
-    expect(readChecked(editor, 0)).toBe(false);
 
-    const baseTimeStamp = 1000;
-    const tap = (offsetMs: number) => {
-      const event = new PointerEvent('pointerup', {
-        bubbles: true,
-        cancelable: true,
-        clientX: 10,
-        clientY: 5,
-        pointerType: 'touch',
-      });
-      Object.defineProperty(event, 'timeStamp', {
-        value: baseTimeStamp + offsetMs,
-      });
-      getCheckListItem(0).dispatchEvent(event);
-    };
-
-    // First tap toggles, second tap within DEDUP_WINDOW_MS is throttled.
-    tap(0);
-    tap(100);
+    // A touch at -20 lands on whatever lies to the item's left.
+    tapWithLayout(container, -20);
 
     expect(readChecked(editor, 0)).toBe(true);
+  });
+
+  it("a tap on the item's content within the touch padding does not toggle it", () => {
+    using editor = buildEditor();
+
+    // 20 is past the 16px marker, on the content (a text node in a real
+    // item, the container here).
+    tapWithLayout(container, 20);
+
+    expect(readChecked(editor, 0)).toBe(false);
   });
 });
