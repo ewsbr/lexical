@@ -51,6 +51,7 @@ import {
 } from './SyncCursors';
 import {$createOrUpdateNodeFromYElement, $updateYFragment} from './SyncV2';
 import {
+  $clampSelectionToNodes,
   $getOrInitCollabNodeFromSharedType,
   $moveSelectionToPreviousNode,
   doesSelectionNeedRecovering,
@@ -275,7 +276,10 @@ function $syncCursorFromYjs(
 
       if ($isRangeSelection(prevSelection)) {
         $syncLocalCursorPosition(binding, provider);
-        if (doesSelectionNeedRecovering(selection)) {
+        if (
+          doesSelectionNeedRecovering(selection) &&
+          !$clampSelectionToNodes(selection)
+        ) {
           // If the selected node is deleted, move the selection to the previous or parent node.
           const anchorNodeKey = selection.anchor.key;
           $moveSelectionToPreviousNode(anchorNodeKey, editorState);

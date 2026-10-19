@@ -798,6 +798,35 @@ export function getPositionFromElementAndOffset(
   };
 }
 
+function getPointEnd(node: LexicalNode): number {
+  return $isElementNode(node)
+    ? node.getChildrenSize()
+    : node.getTextContentSize();
+}
+
+/**
+ * Pulls each point's offset back to the end of its node. Returns false and
+ * changes nothing when a point's node is no longer attached.
+ */
+export function $clampSelectionToNodes(selection: RangeSelection): boolean {
+  const points = [selection.anchor, selection.focus];
+  if (
+    points.some(point => {
+      const node = $getNodeByKey(point.key);
+      return node === null || !node.isAttached();
+    })
+  ) {
+    return false;
+  }
+  for (const point of points) {
+    const end = getPointEnd(point.getNode());
+    if (point.offset > end) {
+      point.set(point.key, end, point.type);
+    }
+  }
+  return true;
+}
+
 export function doesSelectionNeedRecovering(
   selection: RangeSelection,
 ): boolean {
@@ -813,10 +842,12 @@ export function doesSelectionNeedRecovering(
       // We might have removed a node that no longer exists
       !anchorNode.isAttached() ||
       !focusNode.isAttached() ||
-      // If we've split a node, then the offset might not be right
-      ($isTextNode(anchorNode) &&
-        anchor.offset > anchorNode.getTextContentSize()) ||
-      ($isTextNode(focusNode) && focus.offset > focusNode.getTextContentSize())
+      // If we've split a node, then the offset might not be right. An element
+      // point can also outlive children that a splice removed: ElementNode.splice
+      // only moves points on the removed children, and collab v2 reconciles
+      // children with splice.
+      anchor.offset > getPointEnd(anchorNode) ||
+      focus.offset > getPointEnd(focusNode)
     ) {
       recoveryNeeded = true;
     }
