@@ -1107,9 +1107,12 @@ export const $updateYFragment = (
       break;
     }
   }
-  // try to compare and update
-  while (yChildCnt - left - right > 0 && lChildCnt - left - right > 0) {
-    const leftY = yChildren[left];
+  // try to compare and update. `left` counts the lexical children done, which
+  // is also the live index of the next yjs child; `yLeft` indexes `yChildren`,
+  // and runs ahead of `left` once a yjs child is deleted without a replacement.
+  let yLeft = left;
+  while (yChildCnt - yLeft - right > 0 && lChildCnt - left - right > 0) {
+    const leftY = yChildren[yLeft];
     const leftL = lChildren[left];
     const rightY = yChildren[yChildCnt - right - 1];
     const rightL = lChildren[lChildCnt - right - 1];
@@ -1118,11 +1121,13 @@ export const $updateYFragment = (
         $updateYText(leftY, leftL, binding);
       }
       left += 1;
+      yLeft += 1;
     } else {
       let updateLeft =
-        leftY instanceof XmlElement && matchNodeName(leftY, leftL);
+        leftY instanceof XmlElement && canUpdateInPlace(leftY, leftL, binding);
       let updateRight =
-        rightY instanceof XmlElement && matchNodeName(rightY, rightL);
+        rightY instanceof XmlElement &&
+        canUpdateInPlace(rightY, rightL, binding);
       if (updateLeft && updateRight) {
         // decide which which element to update
         const equalityLeft = $computeChildEqualityFactor(
@@ -1157,6 +1162,7 @@ export const $updateYFragment = (
           dirtyElements,
         );
         left += 1;
+        yLeft += 1;
       } else if (updateRight) {
         $updateYFragment(
           y,
@@ -1166,6 +1172,15 @@ export const $updateYFragment = (
           dirtyElements,
         );
         right += 1;
+      } else if (
+        isAmong(leftL, yChildren, yLeft + 1, yChildCnt - right, binding)
+      ) {
+        // leftL's own element is further on, so leftY's node was removed or
+        // moved away: leftL keeps its element, and leftY's node gets a new one
+        // wherever it is now.
+        binding.mapping.delete(yDomFragment.get(left));
+        yDomFragment.delete(left, 1);
+        yLeft += 1;
       } else {
         binding.mapping.delete(yDomFragment.get(left));
         yDomFragment.delete(left, 1);
@@ -1173,10 +1188,11 @@ export const $updateYFragment = (
           $createTypeFromTextOrElementNode(leftL, binding),
         ]);
         left += 1;
+        yLeft += 1;
       }
     }
   }
-  const yDelLen = yChildCnt - left - right;
+  const yDelLen = yChildCnt - yLeft - right;
   if (yChildCnt === 1 && lChildCnt === 0 && yChildren[0] instanceof XmlText) {
     binding.mapping.delete(yChildren[0]);
     // Edge case handling https://github.com/yjs/y-prosemirror/issues/108
@@ -1199,3 +1215,38 @@ export const $updateYFragment = (
 
 const matchNodeName = (yElement: XmlElement, lnode: LexicalNode | TextNode[]) =>
   !(lnode instanceof Array) && yElement.nodeName === lnode.getType();
+
+// An element is only updated in place for the node it is mapped to, never
+// rewritten to hold another, such as a node inserted beside a removed one, or
+// moved over it: the other node gets an element of its own. Otherwise the
+// element would change identity under peers, whose editors would show the
+// other node in the removed one's place, and whose concurrent edits of it
+// would land in the other node's content. An element whose node took another
+// element is mapped to nothing, and is not reused either.
+const canUpdateInPlace = (
+  yElement: XmlElement,
+  lnode: LexicalNode | TextNode[],
+  binding: BindingV2,
+) => {
+  const mapped = binding.mapping.get(yElement);
+  return (
+    !(lnode instanceof Array) &&
+    matchNodeName(yElement, lnode) &&
+    mapped !== undefined &&
+    mapped.getKey() === lnode.getKey()
+  );
+};
+
+/** Whether the element `lnode` was last synced with is in `ytypes[from, to)`. */
+const isAmong = (
+  lnode: LexicalNode | TextNode[],
+  ytypes: (XmlElement | XmlText | XmlHook)[],
+  from: number,
+  to: number,
+  binding: BindingV2,
+) => {
+  const own =
+    lnode instanceof Array ? undefined : binding.mapping.getSharedType(lnode);
+  const at = own === undefined ? -1 : ytypes.indexOf(own, from);
+  return at !== -1 && at < to;
+};
