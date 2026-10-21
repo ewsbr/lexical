@@ -20,9 +20,11 @@ import {
   createCommand,
   type ElementNode,
   getActiveElement,
+  getComposedEventTarget,
   getNearestEditorFromDOMNode,
   getParentElement,
   IS_FIREFOX,
+  isDOMShadowRoot,
   isHTMLElement,
   KEY_ARROW_DOWN_COMMAND,
   KEY_ARROW_LEFT_COMMAND,
@@ -118,12 +120,24 @@ export function registerCheckList(
   const handleTouchStart = (event: TouchEvent) => {
     touchPress = null;
     heldScroll = null;
-    if (event.touches.length !== 1 || !editor.isEditable()) {
+    const rootElement = editor.getRootElement();
+    if (
+      rootElement === null ||
+      event.touches.length !== 1 ||
+      !editor.isEditable()
+    ) {
       return;
     }
     const touch = event.touches[0];
-    const item = event.target;
-    if (isCheckMarkHit(item, touch.clientX, true)) {
+    const item = getCheckMarkItemAt(
+      rootElement,
+      // The listener is on the document, which sees a touch in a shadow root
+      // retargeted to its host.
+      getComposedEventTarget(event),
+      touch.clientX,
+      touch.clientY,
+    );
+    if (item !== null) {
       touchPress = {
         item,
         scrollTops: getAncestorScrollTops(item),
@@ -304,24 +318,22 @@ export function registerCheckList(
 
     editor.registerRootListener(rootElement => {
       if (rootElement !== null) {
+        // The touch padding reaches beyond the item, where a touch can land
+        // outside the root element, so the touch listeners are on the
+        // document.
+        const doc = rootElement.ownerDocument;
         return mergeRegister(
-          // scroll does not bubble: capturing it on the document sees the
-          // scrolling of any ancestor of the item.
           registerEventListeners(
-            rootElement.ownerDocument,
-            {scroll: handleScroll},
-            {capture: true, passive: true},
-          ),
-          registerEventListeners(
-            rootElement,
+            doc,
             {
+              scroll: handleScroll,
               touchmove: handleTouchMove,
               touchstart: handleTouchStart,
             },
             {capture: true, passive: true},
           ),
           registerEventListeners(
-            rootElement,
+            doc,
             {
               touchcancel: () => {
                 touchPress = null;
@@ -395,6 +407,64 @@ function handleCheckItemEvent(
   if (isCheckMarkHit(target, event.clientX, isTouchEvent)) {
     callback(target);
   }
+}
+
+/**
+ * The check list item whose marker a touch at `clientX`, `clientY` is on. The
+ * touch padding reaches beyond the item, where the touch lands on whatever
+ * lies beside it, so the item is also looked for that far to either side. An
+ * item found that way counts only when the touch is beside it, on its marker's
+ * side: on the item itself, a touch beyond the marker is on its content.
+ */
+function getCheckMarkItemAt(
+  rootElement: HTMLElement,
+  target: EventTarget | null,
+  clientX: number,
+  clientY: number,
+): HTMLElement | null {
+  if (isCheckMarkHit(target, clientX, true) && rootElement.contains(target)) {
+    return target;
+  }
+  const rootRect = rootElement.getBoundingClientRect();
+  if (
+    clientY < rootRect.top ||
+    clientY > rootRect.bottom ||
+    clientX < rootRect.left - TOUCH_CLICK_AREA_PADDING ||
+    clientX > rootRect.right + TOUCH_CLICK_AREA_PADDING
+  ) {
+    return null;
+  }
+  for (const offset of [TOUCH_CLICK_AREA_PADDING, -TOUCH_CLICK_AREA_PADDING]) {
+    // In a shadow root, the document would only find the shadow host.
+    const element = getRootDocumentOrShadowRoot(rootElement).elementFromPoint(
+      clientX + offset,
+      clientY,
+    );
+    const item = element && element.closest('li');
+    if (
+      isCheckMarkHit(item, clientX, true) &&
+      rootElement.contains(item) &&
+      isBesideMarker(item, clientX)
+    ) {
+      return item;
+    }
+  }
+  return null;
+}
+
+function getRootDocumentOrShadowRoot(
+  rootElement: HTMLElement,
+): Document | ShadowRoot {
+  const rootNode = rootElement.getRootNode();
+  return isDOMShadowRoot(rootNode) ? rootNode : rootElement.ownerDocument;
+}
+
+function isBesideMarker(item: HTMLElement, clientX: number): boolean {
+  const rect = item.getBoundingClientRect();
+  const clientXInPixels = clientX / calculateZoomLevel(item);
+  return item.dir === 'rtl'
+    ? clientXInPixels > rect.right
+    : clientXInPixels < rect.left;
 }
 
 function isCheckMarkHit(

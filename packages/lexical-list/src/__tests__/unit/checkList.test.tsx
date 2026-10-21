@@ -43,9 +43,15 @@ describe('CheckListExtension mobile tap toggle', () => {
         return originalGetComputedStyle.call(window, element, pseudoElement);
       },
     );
+    // Nor elementFromPoint, which a touch uses to find the item its padding
+    // reaches from beside it. Nothing lies beside the item unless a test says
+    // so.
+    document.elementFromPoint = () => null;
   });
   afterAll(() => {
     vi.restoreAllMocks();
+    // @ts-expect-error jsdom has no elementFromPoint of its own to restore
+    delete document.elementFromPoint;
   });
 
   const checkListExtension = defineExtension({
@@ -199,5 +205,57 @@ describe('CheckListExtension mobile tap toggle', () => {
 
     expect(touchEnd.defaultPrevented).toBe(false);
     expect(readChecked(editor, 0)).toBe(false);
+  });
+
+  // jsdom has no layout: the root spans 0 to 300 and the item sits at 0, so
+  // what lies at any x from 0 on is the item.
+  function tapWithLayout(target: EventTarget, clientX: number) {
+    const li = getCheckListItem(0);
+    const rootRect = vi
+      .spyOn(rootElement, 'getBoundingClientRect')
+      .mockReturnValue({bottom: 100, left: 0, right: 300, top: 0} as DOMRect);
+    const elementFromPoint = vi
+      .spyOn(document, 'elementFromPoint')
+      .mockImplementation(x => (x >= 0 ? li : null));
+    try {
+      dispatchTouch(target, 'touchstart', clientX);
+      dispatchTouch(target, 'touchend', clientX);
+    } finally {
+      elementFromPoint.mockRestore();
+      rootRect.mockRestore();
+    }
+  }
+
+  it('a tap beside the item, within the touch padding, toggles it', () => {
+    using editor = buildEditor();
+
+    // A touch at -20 lands on whatever lies to the item's left.
+    tapWithLayout(container, -20);
+
+    expect(readChecked(editor, 0)).toBe(true);
+  });
+
+  it("a tap on the item's content within the touch padding does not toggle it", () => {
+    using editor = buildEditor();
+
+    // 20 is past the 16px marker, on the content (a text node in a real
+    // item, the container here).
+    tapWithLayout(container, 20);
+
+    expect(readChecked(editor, 0)).toBe(false);
+  });
+
+  it('a tap on the marker of an editor in a shadow root toggles the item', () => {
+    // The document's touch listeners see the touch retargeted to the host.
+    const host = document.createElement('div');
+    container.appendChild(host);
+    host.attachShadow({mode: 'open'}).appendChild(rootElement);
+    using editor = buildEditor();
+    const li = getCheckListItem(0);
+
+    dispatchTouch(li, 'touchstart', 10);
+    dispatchTouch(li, 'touchend', 10);
+
+    expect(readChecked(editor, 0)).toBe(true);
   });
 });
