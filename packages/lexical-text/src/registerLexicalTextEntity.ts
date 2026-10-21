@@ -9,6 +9,8 @@
 import invariant from '@lexical/internal/invariant';
 import {
   $createTextNode,
+  $getSelection,
+  $isRangeSelection,
   $isTextNode,
   type Klass,
   type LexicalEditor,
@@ -85,7 +87,14 @@ export function registerLexicalTextEntity<T extends TextNode>(
           if (diff > 0) {
             const concatText = text.slice(0, diff);
             const newTextContent = previousText + concatText;
-            prevSibling.select();
+            // Points in the text that moves into the entity follow it, and
+            // points after it keep their place; a selection elsewhere stays.
+            const selection = $getSelection();
+            const movedPoints = $isRangeSelection(selection)
+              ? [selection.anchor, selection.focus]
+                  .filter(point => point.key === node.getKey())
+                  .map(point => ({offset: point.offset, point}))
+              : [];
             prevSibling.setTextContent(newTextContent);
 
             if (diff === text.length) {
@@ -93,6 +102,18 @@ export function registerLexicalTextEntity<T extends TextNode>(
             } else {
               const remainingText = text.slice(diff);
               node.setTextContent(remainingText);
+            }
+
+            for (const {point, offset} of movedPoints) {
+              if (offset <= diff) {
+                point.set(
+                  prevSibling.getKey(),
+                  previousText.length + offset,
+                  'text',
+                );
+              } else {
+                point.set(node.getKey(), offset - diff, 'text');
+              }
             }
 
             return;

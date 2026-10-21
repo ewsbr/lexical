@@ -11,7 +11,11 @@ import {
   $createParagraphNode,
   $createTextNode,
   $getRoot,
+  $getSelection,
+  $isRangeSelection,
+  $setSelection,
   type LexicalNode,
+  type ParagraphNode,
   TextNode,
 } from 'lexical';
 import {initializeUnitTest} from 'lexical/src/__tests__/utils';
@@ -108,6 +112,146 @@ describe('registerLexicalTextEntity', () => {
           expect(node.hasFormat('bold')).toBe(true);
           expect(node.getStyle()).toBe('color: red');
           expect(node.isDirectionless()).toBe(true);
+        });
+      });
+
+      test('keeps the caret on its character when text merges into the entity before it', async () => {
+        const {editor} = testEnv;
+        registerLexicalTextEntity(editor, getMatch, TestEntityNode, textNode =>
+          $createTestEntityNode(textNode.getTextContent()),
+        );
+
+        const caretAfterMerge = async (text: string, offset: number) => {
+          await editor.update(() => {
+            const following = $createTextNode(text);
+            $getRoot()
+              .clear()
+              .append(
+                $createParagraphNode().append(
+                  $createTestEntityNode('#ab'),
+                  following,
+                ),
+              );
+            following.select(offset, offset);
+          });
+          return editor.getEditorState().read(() => {
+            const selection = $getSelection();
+            if (!$isRangeSelection(selection)) {
+              return null;
+            }
+            const {anchor} = selection;
+            return [anchor.getNode().getTextContent(), anchor.offset];
+          });
+        };
+
+        expect(await caretAfterMerge('cd', 1)).toEqual(['#abcd', 4]);
+        expect(await caretAfterMerge('cd', 2)).toEqual(['#abcd', 5]);
+        expect(await caretAfterMerge('c de', 3)).toEqual([' de', 2]);
+      });
+
+      test('leaves a selection elsewhere where it is when text merges into an entity', async () => {
+        const {editor} = testEnv;
+        registerLexicalTextEntity(editor, getMatch, TestEntityNode, textNode =>
+          $createTestEntityNode(textNode.getTextContent()),
+        );
+
+        await editor.update(() => {
+          const elsewhere = $createTextNode('Elsewhere');
+          $getRoot()
+            .clear()
+            .append(
+              $createParagraphNode().append($createTestEntityNode('#foo')),
+              $createParagraphNode().append(elsewhere),
+            );
+          elsewhere.select(4, 4);
+        });
+        await editor.update(() => {
+          $getRoot()
+            .getFirstChildOrThrow<ParagraphNode>()
+            .append($createTextNode('bar baz'));
+        });
+
+        editor.getEditorState().read(() => {
+          expect($getRoot().getTextContent()).toBe('#foobar baz\n\nElsewhere');
+          const selection = $getSelection();
+          expect($isRangeSelection(selection)).toBe(true);
+          if ($isRangeSelection(selection)) {
+            expect(selection.anchor.getNode().getTextContent()).toBe(
+              'Elsewhere',
+            );
+            expect(selection.anchor.offset).toBe(4);
+          }
+        });
+      });
+
+      test('maps a backward selection and one that spans the entity and the merged text', async () => {
+        const {editor} = testEnv;
+        registerLexicalTextEntity(editor, getMatch, TestEntityNode, textNode =>
+          $createTestEntityNode(textNode.getTextContent()),
+        );
+
+        const selectionAfterMerge = async (
+          select: (entity: TextNode, following: TextNode) => void,
+        ) => {
+          await editor.update(() => {
+            const entity = $createTestEntityNode('#ab');
+            const following = $createTextNode('cd ef');
+            $getRoot()
+              .clear()
+              .append($createParagraphNode().append(entity, following));
+            select(entity, following);
+          });
+          return editor.getEditorState().read(() => {
+            const selection = $getSelection();
+            if (!$isRangeSelection(selection)) {
+              return null;
+            }
+            const {anchor, focus} = selection;
+            return [
+              [anchor.getNode().getTextContent(), anchor.offset],
+              [focus.getNode().getTextContent(), focus.offset],
+            ];
+          });
+        };
+
+        expect(
+          await selectionAfterMerge((_, following) => following.select(4, 1)),
+        ).toEqual([
+          [' ef', 2],
+          ['#abcd', 4],
+        ]);
+        expect(
+          await selectionAfterMerge((entity, following) => {
+            const selection = entity.select(1, 1);
+            selection.focus.set(following.getKey(), 2, 'text');
+          }),
+        ).toEqual([
+          ['#abcd', 1],
+          ['#abcd', 5],
+        ]);
+      });
+
+      test('leaves no selection when there was none', async () => {
+        const {editor} = testEnv;
+        registerLexicalTextEntity(editor, getMatch, TestEntityNode, textNode =>
+          $createTestEntityNode(textNode.getTextContent()),
+        );
+
+        await editor.update(() => {
+          $getRoot()
+            .clear()
+            .append(
+              $createParagraphNode().append(
+                $createTestEntityNode('#foo'),
+                $createTextNode('bar'),
+              ),
+            );
+          $setSelection(null);
+        });
+
+        editor.getEditorState().read(() => {
+          expect($getRoot().getTextContent()).toBe('#foobar');
+          expect($getSelection()).toBe(null);
         });
       });
     },
