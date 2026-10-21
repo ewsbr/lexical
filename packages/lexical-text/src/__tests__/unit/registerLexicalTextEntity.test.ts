@@ -11,7 +11,10 @@ import {
   $createParagraphNode,
   $createTextNode,
   $getRoot,
+  $getSelection,
+  $isRangeSelection,
   type LexicalNode,
+  type ParagraphNode,
   TextNode,
 } from 'lexical';
 import {initializeUnitTest} from 'lexical/src/__tests__/utils';
@@ -108,6 +111,75 @@ describe('registerLexicalTextEntity', () => {
           expect(node.hasFormat('bold')).toBe(true);
           expect(node.getStyle()).toBe('color: red');
           expect(node.isDirectionless()).toBe(true);
+        });
+      });
+
+      test('keeps the caret on its character when text merges into the entity before it', async () => {
+        const {editor} = testEnv;
+        registerLexicalTextEntity(editor, getMatch, TestEntityNode, textNode =>
+          $createTestEntityNode(textNode.getTextContent()),
+        );
+
+        const caretAfterMerge = async (text: string, offset: number) => {
+          await editor.update(() => {
+            const following = $createTextNode(text);
+            $getRoot()
+              .clear()
+              .append(
+                $createParagraphNode().append(
+                  $createTestEntityNode('#ab'),
+                  following,
+                ),
+              );
+            following.select(offset, offset);
+          });
+          return editor.getEditorState().read(() => {
+            const selection = $getSelection();
+            if (!$isRangeSelection(selection)) {
+              return null;
+            }
+            const {anchor} = selection;
+            return [anchor.getNode().getTextContent(), anchor.offset];
+          });
+        };
+
+        expect(await caretAfterMerge('cd', 1)).toEqual(['#abcd', 4]);
+        expect(await caretAfterMerge('cd', 2)).toEqual(['#abcd', 5]);
+        expect(await caretAfterMerge('c de', 3)).toEqual([' de', 2]);
+      });
+
+      test('leaves a selection elsewhere where it is when text merges into an entity', async () => {
+        const {editor} = testEnv;
+        registerLexicalTextEntity(editor, getMatch, TestEntityNode, textNode =>
+          $createTestEntityNode(textNode.getTextContent()),
+        );
+
+        await editor.update(() => {
+          const elsewhere = $createTextNode('Elsewhere');
+          $getRoot()
+            .clear()
+            .append(
+              $createParagraphNode().append($createTestEntityNode('#foo')),
+              $createParagraphNode().append(elsewhere),
+            );
+          elsewhere.select(4, 4);
+        });
+        await editor.update(() => {
+          $getRoot()
+            .getFirstChildOrThrow<ParagraphNode>()
+            .append($createTextNode('bar baz'));
+        });
+
+        editor.getEditorState().read(() => {
+          expect($getRoot().getTextContent()).toBe('#foobar baz\n\nElsewhere');
+          const selection = $getSelection();
+          expect($isRangeSelection(selection)).toBe(true);
+          if ($isRangeSelection(selection)) {
+            expect(selection.anchor.getNode().getTextContent()).toBe(
+              'Elsewhere',
+            );
+            expect(selection.anchor.offset).toBe(4);
+          }
         });
       });
     },
