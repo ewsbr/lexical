@@ -20,9 +20,11 @@ import {
   createCommand,
   type ElementNode,
   getActiveElement,
+  getComposedEventTarget,
   getNearestEditorFromDOMNode,
   getParentElement,
   IS_FIREFOX,
+  isDOMShadowRoot,
   isHTMLElement,
   KEY_ARROW_DOWN_COMMAND,
   KEY_ARROW_LEFT_COMMAND,
@@ -63,6 +65,9 @@ const CHECKBOX_KEYS = new Set([
   'Shift',
 ]);
 
+// How far the check mark's hit area reaches beyond it for a touch, in CSS
+// pixels.
+const TOUCH_CLICK_AREA_PADDING = 32;
 // How far a finger may travel during a tap on the check mark, in CSS pixels.
 // Browsers start scrolling past about 8.
 const TOUCH_TAP_SLOP = 16;
@@ -101,20 +106,32 @@ export function registerCheckList(
   // The touchstart is not canceled, since that would keep a swipe from
   // scrolling.
   let touchStart: TouchEvent | null = null;
-  // The touchstart's target is not kept after its dispatch in a shadow root,
-  // so the item is.
   let touchItem: HTMLElement | null = null;
   let scrollTops: ScrollTops = [];
   let holdScrollUntil = 0;
   const handleTouchStart = (event: TouchEvent) => {
     touchStart = null;
     holdScrollUntil = 0;
-    if (event.touches.length === 1) {
-      handleCheckItemEvent(event, event.target, item => {
-        touchStart = event;
-        touchItem = item;
-        scrollTops = getAncestorScrollTops(item);
-      });
+    const rootElement = editor.getRootElement();
+    if (rootElement === null || event.touches.length !== 1) {
+      return;
+    }
+    // The listener is on the document, which sees a touch in a shadow root
+    // retargeted to its host.
+    const target = getComposedEventTarget(event);
+    const {clientX, clientY} = event.touches[0];
+    const press = (item: EventTarget | null) => {
+      if (item instanceof Node && rootElement.contains(item)) {
+        handleCheckItemEvent(event, item, checkItem => {
+          touchStart = event;
+          touchItem = checkItem;
+          scrollTops = getAncestorScrollTops(checkItem);
+        });
+      }
+    };
+    press(target);
+    if (touchStart === null) {
+      press(getCheckItemBeside(rootElement, clientX, clientY));
     }
   };
   const handleTouchMove = (event: TouchEvent) => {
@@ -348,8 +365,11 @@ export function registerCheckList(
             handleScroll,
             {capture: true, passive: true},
           ),
+          // The touch padding reaches beyond the item, where a touch can land
+          // outside the root element, so the touch listeners are on the
+          // document.
           registerEventListeners(
-            rootElement,
+            rootElement.ownerDocument,
             {
               touchcancel: () => {
                 touchStart = null;
@@ -360,10 +380,12 @@ export function registerCheckList(
             {capture: true, passive: true},
           ),
           // passive: false, so that the touchend of a tap can be canceled.
-          registerEventListener(rootElement, 'touchend', handleTouchEnd, {
-            capture: true,
-            passive: false,
-          }),
+          registerEventListener(
+            rootElement.ownerDocument,
+            'touchend',
+            handleTouchEnd,
+            {capture: true, passive: false},
+          ),
         );
       }
     }),
@@ -430,7 +452,7 @@ function handleCheckItemEvent(
   const isTouchEvent =
     pointerType === 'touch' ||
     ('pointerType' in event && event.pointerType === 'touch');
-  const clickAreaPadding = isTouchEvent ? 32 : 0; // Add 32px padding for touch events
+  const clickAreaPadding = isTouchEvent ? TOUCH_CLICK_AREA_PADDING : 0; // Add 32px padding for touch events
 
   if (
     target.dir === 'rtl'
@@ -470,6 +492,34 @@ function handleClick(
       }
     }
   });
+}
+
+/**
+ * The check list item whose marker lies beside a touch at `clientX`,
+ * `clientY`, within the touch padding: such a touch lands on whatever lies
+ * beside the item. It counts only on the marker's side, since on the item a
+ * touch past the marker is on its content.
+ */
+function getCheckItemBeside(
+  rootElement: HTMLElement,
+  clientX: number,
+  clientY: number,
+): HTMLElement | null {
+  // In a shadow root, the document would only find the shadow host.
+  const rootNode = rootElement.getRootNode();
+  const doc = isDOMShadowRoot(rootNode) ? rootNode : rootElement.ownerDocument;
+  for (const offset of [TOUCH_CLICK_AREA_PADDING, -TOUCH_CLICK_AREA_PADDING]) {
+    const element = doc.elementFromPoint(clientX + offset, clientY);
+    const item = element && element.closest('li');
+    if (item && rootElement.contains(item)) {
+      const rect = item.getBoundingClientRect();
+      const x = clientX / calculateZoomLevel(item);
+      if (item.dir === 'rtl' ? x > rect.right : x < rect.left) {
+        return item;
+      }
+    }
+  }
+  return null;
 }
 
 type ScrollTops = [Element, number][];
