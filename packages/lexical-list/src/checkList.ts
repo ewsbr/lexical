@@ -21,6 +21,7 @@ import {
   type ElementNode,
   getActiveElement,
   getNearestEditorFromDOMNode,
+  getParentElement,
   IS_FIREFOX,
   isHTMLElement,
   KEY_ARROW_DOWN_COMMAND,
@@ -62,6 +63,13 @@ const CHECKBOX_KEYS = new Set([
   'Shift',
 ]);
 
+// How far a finger may travel during a tap on the check mark, in CSS pixels.
+// Browsers start scrolling past about 8.
+const TOUCH_TAP_SLOP = 16;
+// How long a tap holds the scroll where it began, in milliseconds, while a
+// fling its drift started runs out.
+const TOUCH_SCROLL_HOLD_MS = 600;
+
 export const INSERT_CHECK_LIST_COMMAND: LexicalCommand<void> = createCommand(
   'INSERT_CHECK_LIST_COMMAND',
 );
@@ -83,54 +91,61 @@ export function registerCheckList(
       ? () => disableTakeFocusOnClick
       : disableTakeFocusOnClick.peek.bind(disableTakeFocusOnClick);
 
-  // Mobile tap fix: the touchstart listener registered below calls
-  // event.preventDefault() to keep the caret away from the marker. On iOS
-  // Safari and Android Chrome that suppression also cancels the synthesized
-  // click, so handleClick never runs and the checkbox cannot be toggled by
-  // tap. We additionally listen for pointerup with pointerType === 'touch'
-  // and run the same toggle logic, deduplicating against any click that
-  // does fire on browsers where preventDefault doesn't suppress it.
-  //
-  // Dedup state is per-target: recorded as `__lexicalCheckListLastHandled`
-  // on the target element, and written only by the touch pointerup path.
-  // A global window would block tapping a second checkbox within 500ms of
-  // toggling the first. The click path only reads the timestamp, so rapid
-  // mouse clicks on the same desktop checkbox are not throttled — only the
-  // synthesized click that follows a touch pointerup is absorbed.
-  const DEDUP_WINDOW_MS = 500;
-  const isWithinDedupWindow = (
-    event: PointerEvent | MouseEvent | TouchEvent,
-  ): boolean => {
-    const target = event.target;
-    if (!isHTMLElement(target)) {
-      return false;
-    }
-    // @ts-ignore internal field
-    const last = target.__lexicalCheckListLastHandled as number | undefined;
-    return last !== undefined && event.timeStamp - last < DEDUP_WINDOW_MS;
-  };
-  const recordHandled = (event: PointerEvent | MouseEvent | TouchEvent) => {
-    const target = event.target;
-    if (isHTMLElement(target)) {
-      // @ts-ignore internal field
-      target.__lexicalCheckListLastHandled = event.timeStamp;
+  // A tap on the marker is taken from touch events: a finger that drifts a
+  // few pixels starts a scroll, which ends the pointer in pointercancel (in
+  // Firefox, for any movement at all), while the touch still ends in
+  // touchend. The tap may travel TOUCH_TAP_SLOP, and whatever its drift
+  // scrolled is put back and held there for TOUCH_SCROLL_HOLD_MS; moving
+  // further is a swipe, which scrolls and toggles nothing. Canceling the
+  // touchend keeps the browser from placing the caret or sending a click.
+  // The touchstart is not canceled, since that would keep a swipe from
+  // scrolling.
+  let touchStart: TouchEvent | null = null;
+  // The touchstart's target is not kept after its dispatch in a shadow root,
+  // so the item is.
+  let touchItem: HTMLElement | null = null;
+  let scrollTops: ScrollTops = [];
+  let holdScrollUntil = 0;
+  const handleTouchStart = (event: TouchEvent) => {
+    touchStart = null;
+    holdScrollUntil = 0;
+    if (event.touches.length === 1) {
+      handleCheckItemEvent(event, event.target, item => {
+        touchStart = event;
+        touchItem = item;
+        scrollTops = getAncestorScrollTops(item);
+      });
     }
   };
-  const configHandleClick = (event: PointerEvent | MouseEvent | TouchEvent) => {
-    if (isWithinDedupWindow(event)) {
-      return;
+  const handleTouchMove = (event: TouchEvent) => {
+    if (
+      touchStart !== null &&
+      Math.hypot(
+        event.touches[0].clientX - touchStart.touches[0].clientX,
+        event.touches[0].clientY - touchStart.touches[0].clientY,
+      ) > TOUCH_TAP_SLOP
+    ) {
+      touchStart = null;
     }
-    handleClick(event, peekDisableTakeFocusOnClick());
   };
-  const configHandlePointerUp = (event: PointerEvent) => {
-    if (event.pointerType !== 'touch') {
-      return;
+  const handleTouchEnd = (event: TouchEvent) => {
+    const tap = touchStart;
+    touchStart = null;
+    if (tap !== null) {
+      // Not cancelable once the drift has started a scroll, which already
+      // keeps the browser from sending a click.
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+      restoreScrollTops(scrollTops);
+      holdScrollUntil = event.timeStamp + TOUCH_SCROLL_HOLD_MS;
+      handleClick(tap, peekDisableTakeFocusOnClick(), touchItem);
     }
-    if (isWithinDedupWindow(event)) {
-      return;
+  };
+  const handleScroll = (event: Event) => {
+    if (event.timeStamp < holdScrollUntil) {
+      restoreScrollTops(scrollTops);
     }
-    recordHandled(event);
-    handleClick(event, peekDisableTakeFocusOnClick());
   };
   // What the last pointer press landed on, recorded in the capture-phase
   // handler that runs before the browser moves focus and consumed once the
@@ -283,12 +298,9 @@ export function registerCheckList(
             // such as a right click opening the context menu.
             click: event => {
               returnFocusAfterPress();
-              configHandleClick(event);
+              handleClick(event, peekDisableTakeFocusOnClick());
             },
-            pointerup: event => {
-              returnFocusAfterPress();
-              configHandlePointerUp(event);
-            },
+            pointerup: returnFocusAfterPress,
           }),
           // Use capture so we run before other listeners that might move focus.
           // Some browsers / integrations still generate mousedown events as well
@@ -328,19 +340,30 @@ export function registerCheckList(
             },
             {capture: true},
           ),
-          // Intercept touchstart to stop the mobile browser from placing the
-          // caret and opening the keyboard when tapping the checklist marker.
-          // passive:false lets the handler call preventDefault, so it needs its
-          // own options and can't share the capture-only group above.
+          // scroll does not bubble: capturing it on the document sees the
+          // scrolling of any ancestor of the item.
           registerEventListener(
-            rootElement,
-            'touchstart',
-            configHandleSelectDefaults,
-            {
-              capture: true,
-              passive: false,
-            },
+            rootElement.ownerDocument,
+            'scroll',
+            handleScroll,
+            {capture: true, passive: true},
           ),
+          registerEventListeners(
+            rootElement,
+            {
+              touchcancel: () => {
+                touchStart = null;
+              },
+              touchmove: handleTouchMove,
+              touchstart: handleTouchStart,
+            },
+            {capture: true, passive: true},
+          ),
+          // passive: false, so that the touchend of a tap can be canceled.
+          registerEventListener(rootElement, 'touchend', handleTouchEnd, {
+            capture: true,
+            passive: false,
+          }),
         );
       }
     }),
@@ -349,10 +372,9 @@ export function registerCheckList(
 
 function handleCheckItemEvent(
   event: PointerEvent | MouseEvent | TouchEvent,
-  callback: () => void,
+  target: EventTarget | null,
+  callback: (item: HTMLElement) => void,
 ) {
-  const target = event.target;
-
   if (!isHTMLElement(target)) {
     return;
   }
@@ -417,17 +439,18 @@ function handleCheckItemEvent(
       : clientXInPixels > rect.left - clickAreaPadding &&
         clientXInPixels < rect.left + beforeWidthInPixels + clickAreaPadding
   ) {
-    callback();
+    callback(target);
   }
 }
 
 function handleClick(
   event: PointerEvent | MouseEvent | TouchEvent,
   disableFocusOnClick: boolean,
+  target: EventTarget | null = event.target,
 ) {
-  handleCheckItemEvent(event, () => {
-    if (isHTMLElement(event.target)) {
-      const domNode = event.target;
+  handleCheckItemEvent(event, target, () => {
+    if (isHTMLElement(target)) {
+      const domNode = target;
       const editor = getNearestEditorFromDOMNode(domNode);
 
       if (editor != null && editor.isEditable()) {
@@ -449,6 +472,24 @@ function handleClick(
   });
 }
 
+type ScrollTops = [Element, number][];
+
+function getAncestorScrollTops(element: Element): ScrollTops {
+  const tops: ScrollTops = [];
+  for (let el = getParentElement(element); el; el = getParentElement(el)) {
+    tops.push([el, el.scrollTop]);
+  }
+  return tops;
+}
+
+function restoreScrollTops(tops: ScrollTops): void {
+  for (const [el, scrollTop] of tops) {
+    if (el.scrollTop !== scrollTop) {
+      el.scrollTop = scrollTop;
+    }
+  }
+}
+
 /**
  * Prevents default focus switch behavior
  *
@@ -461,7 +502,7 @@ function handleSelectDefaults(
 ): boolean {
   let isCheckMarkPress = false;
 
-  handleCheckItemEvent(event, () => {
+  handleCheckItemEvent(event, event.target, () => {
     isCheckMarkPress = true;
     // Prevents caret moving when clicking on check mark.
     event.preventDefault();

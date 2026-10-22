@@ -98,24 +98,73 @@ describe('CheckListExtension mobile tap toggle', () => {
     });
   }
 
-  it('touch pointerup over the marker area toggles the item', () => {
-    using editor = buildEditor();
-    expect(readChecked(editor, 0)).toBe(false);
+  // jsdom cannot construct Touch objects, so the touch lists are stubbed.
+  function dispatchTouch(
+    target: EventTarget,
+    type: 'touchstart' | 'touchmove' | 'touchend',
+    clientX: number,
+    clientY = 5,
+  ): Event {
+    const touch = {clientX, clientY};
+    const event = new Event(type, {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    Object.defineProperties(event, {
+      changedTouches: {value: [touch]},
+      touches: {value: type === 'touchend' ? [] : [touch]},
+    });
+    target.dispatchEvent(event);
+    return event;
+  }
 
+  it('a tap on the marker toggles the item once and cancels the touchend but not the touchstart', () => {
+    using editor = buildEditor();
     const li = getCheckListItem(0);
-    // clientX is well inside the marker hit area for any plausible
-    // ::before width / touch padding combination.
-    li.dispatchEvent(
-      new PointerEvent('pointerup', {
-        bubbles: true,
-        cancelable: true,
-        clientX: 10,
-        clientY: 5,
-        pointerType: 'touch',
-      }),
-    );
+
+    const touchStart = dispatchTouch(li, 'touchstart', 10);
+    const touchEnd = dispatchTouch(li, 'touchend', 10);
+    // The click a canceled touchend would have sent toggles nothing more.
+    expect(touchEnd.defaultPrevented).toBe(true);
+    expect(touchStart.defaultPrevented).toBe(false);
+    expect(readChecked(editor, 0)).toBe(true);
+  });
+
+  it('a tap whose finger drifts within the slop still toggles', () => {
+    using editor = buildEditor();
+    const li = getCheckListItem(0);
+
+    dispatchTouch(li, 'touchstart', 10, 5);
+    dispatchTouch(li, 'touchmove', 14, 15);
+    dispatchTouch(li, 'touchend', 14, 15);
 
     expect(readChecked(editor, 0)).toBe(true);
+  });
+
+  it('a swipe from the marker toggles nothing and leaves the touchend alone', () => {
+    using editor = buildEditor();
+    const li = getCheckListItem(0);
+
+    dispatchTouch(li, 'touchstart', 10, 5);
+    dispatchTouch(li, 'touchmove', 10, -40);
+    const touchEnd = dispatchTouch(li, 'touchend', 10, -40);
+
+    expect(touchEnd.defaultPrevented).toBe(false);
+    expect(readChecked(editor, 0)).toBe(false);
+  });
+
+  it('taps on two different items toggle both', () => {
+    using editor = buildEditor();
+
+    for (const index of [0, 1]) {
+      const li = getCheckListItem(index);
+      dispatchTouch(li, 'touchstart', 10);
+      dispatchTouch(li, 'touchend', 10);
+    }
+
+    expect(readChecked(editor, 0)).toBe(true);
+    expect(readChecked(editor, 1)).toBe(true);
   });
 
   it('mouse pointerup is ignored (click stays the desktop path)', () => {
@@ -134,65 +183,6 @@ describe('CheckListExtension mobile tap toggle', () => {
     );
 
     expect(readChecked(editor, 0)).toBe(false);
-  });
-
-  it('pointerup followed by a synthesized click does not double-toggle', () => {
-    using editor = buildEditor();
-    expect(readChecked(editor, 0)).toBe(false);
-
-    const li = getCheckListItem(0);
-    const baseTimeStamp = 1000;
-    const pointerUp = new PointerEvent('pointerup', {
-      bubbles: true,
-      cancelable: true,
-      clientX: 10,
-      clientY: 5,
-      pointerType: 'touch',
-    });
-    Object.defineProperty(pointerUp, 'timeStamp', {value: baseTimeStamp});
-    li.dispatchEvent(pointerUp);
-    expect(readChecked(editor, 0)).toBe(true);
-
-    // Browsers where touchstart preventDefault did not suppress click
-    // also fire it shortly after. The dedup window must absorb it.
-    const click = new MouseEvent('click', {
-      bubbles: true,
-      cancelable: true,
-      clientX: 10,
-      clientY: 5,
-    });
-    Object.defineProperty(click, 'timeStamp', {value: baseTimeStamp + 50});
-    li.dispatchEvent(click);
-
-    expect(readChecked(editor, 0)).toBe(true);
-  });
-
-  it('rapid taps on two different items toggle both within the dedup window', () => {
-    using editor = buildEditor();
-    expect(readChecked(editor, 0)).toBe(false);
-    expect(readChecked(editor, 1)).toBe(false);
-
-    const baseTimeStamp = 1000;
-    const tap = (target: HTMLLIElement, offsetMs: number) => {
-      const event = new PointerEvent('pointerup', {
-        bubbles: true,
-        cancelable: true,
-        clientX: 10,
-        clientY: 5,
-        pointerType: 'touch',
-      });
-      Object.defineProperty(event, 'timeStamp', {
-        value: baseTimeStamp + offsetMs,
-      });
-      target.dispatchEvent(event);
-    };
-
-    tap(getCheckListItem(0), 0);
-    // 100ms later: well inside DEDUP_WINDOW_MS, tap a different box.
-    tap(getCheckListItem(1), 100);
-
-    expect(readChecked(editor, 0)).toBe(true);
-    expect(readChecked(editor, 1)).toBe(true);
   });
 
   it('rapid mouse clicks on the same item all toggle (desktop not throttled)', () => {
@@ -220,28 +210,16 @@ describe('CheckListExtension mobile tap toggle', () => {
     expect(readChecked(editor, 0)).toBe(false);
   });
 
-  it('rapid touch taps on the same item are throttled (mobile preserved)', () => {
+  it('a tap on the marker of an editor in a shadow root toggles the item', () => {
+    // After its dispatch, the touchstart no longer has its target.
+    const host = document.createElement('div');
+    container.appendChild(host);
+    host.attachShadow({mode: 'open'}).appendChild(rootElement);
     using editor = buildEditor();
-    expect(readChecked(editor, 0)).toBe(false);
+    const li = getCheckListItem(0);
 
-    const baseTimeStamp = 1000;
-    const tap = (offsetMs: number) => {
-      const event = new PointerEvent('pointerup', {
-        bubbles: true,
-        cancelable: true,
-        clientX: 10,
-        clientY: 5,
-        pointerType: 'touch',
-      });
-      Object.defineProperty(event, 'timeStamp', {
-        value: baseTimeStamp + offsetMs,
-      });
-      getCheckListItem(0).dispatchEvent(event);
-    };
-
-    // First tap toggles, second tap within DEDUP_WINDOW_MS is throttled.
-    tap(0);
-    tap(100);
+    dispatchTouch(li, 'touchstart', 10);
+    dispatchTouch(li, 'touchend', 10);
 
     expect(readChecked(editor, 0)).toBe(true);
   });
