@@ -259,7 +259,7 @@ function $exportChildrenForSelection(
             textNode,
             'clone',
           );
-          return exportTextFormat(
+          return $exportTextFormat(
             textNode,
             slicedNode.getTextContent(),
             textFormatTransformers,
@@ -281,7 +281,11 @@ function $exportChildrenForSelection(
           childIncluded = true;
         }
         if (childIncluded) {
-          output.push(result);
+          output.push(
+            $isElementNode(child) && child.isInline()
+              ? result + $closeTagsAfter(child, unclosedTags, unclosableTags)
+              : result,
+          );
           anyChildIncluded = true;
         }
         continue mainLoop;
@@ -297,7 +301,7 @@ function $exportChildrenForSelection(
       if (childIncluded) {
         const target = $sliceSelectedTextNodeContent(selection, child, 'clone');
         output.push(
-          exportTextFormat(
+          $exportTextFormat(
             child,
             target.getTextContent(),
             textFormatTransformers,
@@ -427,7 +431,7 @@ function $exportChildren(
             shouldPreserveNewLines,
           ),
         (textNode, textContent) =>
-          exportTextFormat(
+          $exportTextFormat(
             textNode,
             textContent,
             textTransformersIndex,
@@ -438,7 +442,11 @@ function $exportChildren(
       );
 
       if (result != null) {
-        output.push(result);
+        output.push(
+          $isElementNode(child) && child.isInline()
+            ? result + $closeTagsAfter(child, unclosedTags, unclosableTags)
+            : result,
+        );
         continue mainLoop;
       }
     }
@@ -447,7 +455,7 @@ function $exportChildren(
       output.push($exportLineBreak(child));
     } else if ($isTextNode(child)) {
       output.push(
-        exportTextFormat(
+        $exportTextFormat(
           child,
           child.getTextContent(),
           textTransformersIndex,
@@ -480,7 +488,7 @@ function $exportLineBreak(node: LineBreakNode): string {
   return $getState(node, hardLineBreakState) + '\n';
 }
 
-function exportTextFormat(
+function $exportTextFormat(
   node: TextNode,
   textContent: string,
   textTransformers: TextFormatTransformer[],
@@ -541,9 +549,6 @@ function exportTextFormat(
   let closingTagsBefore = '';
   let closingTagsAfter = '';
 
-  const prevNode = getTextSibling(node, true);
-  const nextNode = getTextSibling(node, false);
-
   const applied = new Set();
 
   for (const transformer of textTransformers) {
@@ -569,12 +574,9 @@ function exportTextFormat(
     ) {
       applied.add(format);
 
-      // append the tag to openingTags, if it's not applied to the previous nodes,
-      // or the nodes before that (which would result in an unclosed tag)
-      if (
-        !checkHasFormat(prevNode, format) ||
-        !unclosedTags.find(element => element.tag === tag)
-      ) {
+      // append the tag to openingTags, unless it is open already: from the previous
+      // nodes, or from before the link this node is in
+      if (!unclosedTags.find(element => element.tag === tag)) {
         unclosedTags.push({format, tag});
         openingTags += tag;
       }
@@ -584,7 +586,7 @@ function exportTextFormat(
   // close any tags in the same order they were applied, if necessary
   for (let i = 0; i < unclosedTags.length; i++) {
     const nodeHasFormat = hasFormat(node, unclosedTags[i].format);
-    const nextNodeHasFormat = hasFormat(nextNode, unclosedTags[i].format);
+    const nextNodeHasFormat = $continuesAfter(node, unclosedTags[i].format);
 
     // prevent adding closing tag if next sibling will do it
     if (nodeHasFormat && nextNodeHasFormat) {
@@ -637,14 +639,52 @@ function exportTextFormat(
   );
 }
 
-function getTextSibling(node: TextNode, backward: boolean): TextNode | null {
-  const sibling = backward ? node.getPreviousSibling() : node.getNextSibling();
+/**
+ * Whether `format` goes on after `node`: in the next text node, or over all the
+ * text of the inline element after it, such as a link, whose tags then wrap it:
+ * `*a [b](url) c*` rather than `*a* [*b*](url) *c*`.
+ */
+function $continuesAfter(node: LexicalNode, format: TextFormatType): boolean {
+  const next = node.getNextSibling();
+  if ($isTextNode(next)) {
+    return next.hasFormat(format);
+  }
+  if (!$isElementNode(next) || !next.isInline()) {
+    return false;
+  }
+  const texts = next.getAllTextNodes();
+  return texts.length > 0 && texts.every(text => text.hasFormat(format));
+}
 
-  if ($isTextNode(sibling)) {
-    return sibling;
+/**
+ * Closes, right after an inline element, the tags opened before it that do not go
+ * on past it: its children could not close them, as the closing tag would land
+ * inside the element (`**text [link**](url)`).
+ */
+function $closeTagsAfter(
+  element: LexicalNode,
+  unclosedTags: {format: TextFormatType; tag: string}[],
+  unclosableTags: {format: TextFormatType; tag: string}[],
+): string {
+  const isUnclosable = (tag: string) =>
+    unclosableTags.some(unclosable => unclosable.tag === tag);
+  const first = unclosedTags.findIndex(
+    ({format, tag}) => !isUnclosable(tag) && !$continuesAfter(element, format),
+  );
+  if (first === -1) {
+    return '';
   }
 
-  return null;
+  let closingTags = '';
+  while (unclosedTags.length > first) {
+    const {tag} = unclosedTags[unclosedTags.length - 1];
+    if (isUnclosable(tag)) {
+      break;
+    }
+    closingTags += tag;
+    unclosedTags.pop();
+  }
+  return closingTags;
 }
 
 function hasFormat(
