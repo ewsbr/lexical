@@ -1041,6 +1041,7 @@ export function syncCursorPositions(
 
       if (focusing) {
         const {anchorKey, anchorOffset, focusKey, focusOffset} = editor.read(
+          'latest',
           () => $getAnchorAndFocusForUserState(binding, awareness),
         );
 
